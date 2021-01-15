@@ -1,3 +1,4 @@
+##!/bin/bash
 #9/14 MAB
 #Quality trimming raw, demultiplexed shotgun sequences with metawrap's read_qc module (TrimGalore (v. 0.5.0) & Cutadapt (v. 1.18))
 #These blocks were all input into the command line individually 
