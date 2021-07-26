@@ -1,0 +1,94 @@
+#Metawrap 1.3.2 Pipeline Implementation Example with Sage-Grouse Metagenomics Dataset
+#MAB 7/26/21 
+#
+#N.B. the components of this script are meant to be run independently, not as one unit
+#Additional configurations to conda environment may be needed.
+#For tutorial example, see https://github.com/bxlab/metaWRAP/blob/master/Usage_tutorial.md
+#
+##################################################################################################################################################################
+
+#INTRODUCTION
+#upload raw .fastq.gz into this directory in format _1.fastq.gz and _2.fastq.gz format (forward and reverse)
+#directory=sage_grouse2; directories for each step within this
+
+#an environment with the latest metawrap installed should be activated when running these commands
+conda create -y -n metawrap-env python=2.7
+conda activate metawrap-env
+conda config --add channels defaults
+conda config --add channels conda-forge
+conda config --add channels bioconda
+conda config --add channels ursky
+conda install -y -c ursky metawrap-mg
+
+#READ_QC
+#download reference genome (GCA_005890655.1_Cmin_1.0_genomic.fna.gz) for removing host DNA contamination and configure; run trimming for host DNA and quality
+
+#configure reference genome
+mkdir BMTAGGER_INDEX/
+mv GCA_005890655.1_Cmin_1.0_genomic.fna.gz BMTAGGER_INDEX/
+gunzip GCA_005890655.1_Cmin_1.0_genomic.fna.gz
+mv GCA_005890655.1_Cmin_1.0_genomic.fna Cmin.fna
+bmtool -d Cmin.fna -o Cmin.bitmask
+srprism mkindex -i Cmin.fna -o Cmin.srprism -M 100000
+
+#N.B. Modify the path in the metawrap config file 
+#vim ~/.conda/envs/metawrap-env/bin/config-metawrap:
+#insert: BMTAGGER_DB=/data/grouse_shotgun/sage_grouse2/BMTAGGER_INDEX
+
+#actually run READ_QC
+mkdir READ_QC
+for F in RAW_READS/*_1.fastq.gz; do 
+	R=${F%_*}_2.fastq.gz
+	BASE=${F##*/}
+	SAMPLE=${BASE%_*}
+	nohup metawrap read_qc -1 $F -2 $R -x Cmin -t 8 -o READ_QC/$SAMPLE &
+done	
+
+#Move quality controlled, trimmed reads to separate directory:
+mkdir CLEAN_READS
+for i in READ_QC/*; do 
+	b=${i#*/}
+	mv ${i}/final_pure_reads_1.fastq CLEAN_READS/${b}_1.fastq
+	mv ${i}/final_pure_reads_2.fastq CLEAN_READS/${b}_2.fastq
+done
+
+#ASSEMBLY
+#Most computationally- and time-intensive step; uses meta-spades but can use megahit
+
+#Concatenate all samples into one .fastq file before assembly:
+cat CLEAN_READS/*_1.fastq > CLEAN_READS/ALL_READS_1.fastq
+cat CLEAN_READS/*_2.fastq > CLEAN_READS/ALL_READS_2.fastq
+
+nohup metawrap assembly -1 CLEAN_READS/ALL_READS_1.fastq -2 CLEAN_READS/ALL_READS_2.fastq -m 2000 -t 60 --metaspades -o ASSEMBLY
+
+#INITIAL BINNING
+#binning with three methods; results will be combined with metawrap's own algorithm later in pipeline
+
+mkdir INITIAL_BINNING
+nohup metawrap binning -o INITIAL_BINNING -t 60 -m 2000 -a ASSEMBLY/final_assembly.fasta --metabat2 CLEAN_READS/*.fastq
+nohup metawrap binning -o INITIAL_BINNING -t 60 -m 2000 -a ASSEMBLY/final_assembly.fasta --maxbin2 CLEAN_READS/*.fastq
+nohup metawrap binning -o INITIAL_BINNING -t 60 -m 2000 -a ASSEMBLY/final_assembly.fasta --concoct CLEAN_READS/*.fastq
+
+#CheckM database configuration:
+mkdir MY_CHECKM_FOLDER
+#Manually download the database:
+cd MY_CHECKM_FOLDER
+wget https://data.ace.uq.edu.au/public/CheckM_databases/checkm_data_2015_01_16.tar.gz
+tar -xvf *.tar.gz
+rm *.gz
+cd ../
+checkm data setRoot /home/evogenlab/grouse_shotgun/MY_CHECKM_FOLDER
+
+#BIN REFINEMENT
+#The 70 and 5 parameters here refer to acceptable amounts of completion and contamination respectively, and these are the default values for this process.
+
+mkdir BIN_REFINEMENT
+nohup metawrap bin_refinement -o BIN_REFINEMENT -t 60 -A INITIAL_BINNING/metabat2_bins/ -B INITIAL_BINNING/maxbin2_bins/ -C INITIAL_BINNING/concoct_bins/ -c 70 -x 5
+
+#QUANTIFY BINS
+mkdir QUANT_BINS
+nohup metawrap quant_bins -b BIN_REFINEMENT/metawrap_70_5_bins -o QUANT_BINS -a ASSEMBLY/final_assembly.fasta CLEAN_READS/*fastq
+
+#REASSEMBLE BINS
+mkdir BIN_REASSEMBLY
+nohup metawrap reassemble_bins -o BIN_REASSEMBLY -1 CLEAN_READS/ALL_READS_1.fastq -2 CLEAN_READS/ALL_READS_2.fastq -t 60 -m 2000 -c 70 -x 5 -b BIN_REFINEMENT/metawrap_70_5_bins
