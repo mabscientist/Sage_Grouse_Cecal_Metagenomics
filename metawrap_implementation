@@ -61,9 +61,15 @@ cat CLEAN_READS/*_2.fastq > CLEAN_READS/ALL_READS_2.fastq
 
 nohup metawrap assembly -1 CLEAN_READS/ALL_READS_1.fastq -2 CLEAN_READS/ALL_READS_2.fastq -m 2000 -t 60 --metaspades -o ASSEMBLY
 
+#KRAKEN2
+#download taxonomy and build libraries based on project before running this step. I used archaea, bacteria, UniVec_Core, viral
+nohup metawrap kraken2 -o KRAKEN -t 60 -s 1000000 CLEAN_READS/*.fastq ASSEMBLY/final_assembly.fasta
+
+#BLOBOLOGY
+nohup metawrap blobology -a ASSEMBLY/final_assembly.fasta -t 32 -o BLOBOLOGY --bins BIN_REFINEMENT/metawrap_70_5_bins CLEAN_READS/*.fastq
+
 #INITIAL BINNING
 #binning with three methods; results will be combined with metawrap's own algorithm later in pipeline
-
 mkdir INITIAL_BINNING
 nohup metawrap binning -o INITIAL_BINNING -t 60 -m 2000 -a ASSEMBLY/final_assembly.fasta --metabat2 CLEAN_READS/*.fastq
 nohup metawrap binning -o INITIAL_BINNING -t 60 -m 2000 -a ASSEMBLY/final_assembly.fasta --maxbin2 CLEAN_READS/*.fastq
@@ -81,14 +87,43 @@ checkm data setRoot /home/evogenlab/grouse_shotgun/MY_CHECKM_FOLDER
 
 #BIN REFINEMENT
 #The 70 and 5 parameters here refer to acceptable amounts of completion and contamination respectively, and these are the default values for this process.
-
 mkdir BIN_REFINEMENT
 nohup metawrap bin_refinement -o BIN_REFINEMENT -t 60 -A INITIAL_BINNING/metabat2_bins/ -B INITIAL_BINNING/maxbin2_bins/ -C INITIAL_BINNING/concoct_bins/ -c 70 -x 5
 
 #QUANTIFY BINS
 mkdir QUANT_BINS
-nohup metawrap quant_bins -b BIN_REFINEMENT/metawrap_70_5_bins -o QUANT_BINS -a ASSEMBLY/final_assembly.fasta CLEAN_READS/*fastq
+nohup metawrap quant_bins -b BIN_REFINEMENT/metawrap_70_5_bins -o QUANT_BINS -a ASSEMBLY/final_assembly.fasta CLEAN_READS/*.fastq
 
 #REASSEMBLE BINS
 mkdir BIN_REASSEMBLY
 nohup metawrap reassemble_bins -o BIN_REASSEMBLY -1 CLEAN_READS/ALL_READS_1.fastq -2 CLEAN_READS/ALL_READS_2.fastq -t 60 -m 2000 -c 70 -x 5 -b BIN_REFINEMENT/metawrap_70_5_bins
+
+#NCBI Classification configuration
+mkdir NCBI_nt
+cd  NCBI_nt
+wget "ftp://ftp.ncbi.nlm.nih.gov/blast/db/v4/nt_v4.*.tar.gz"
+for a in nt.*.tar.gz; do tar xzf $a; done
+
+mkdir NCBI_tax
+cd NCBI_tax
+wget ftp://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz
+tar -xvf taxdump.tar.gz
+
+vim ~/.conda/envs/metawrap-env/bin/config-metawrap
+#insert: BLASTDB=/data/grouse_shotgun/NCBI_nt; TAXDUMP=/data/grouse_shotgun/NCBI_tax
+
+#BIN CLASSIFICATION
+nohup metawrap classify_bins -b BIN_REASSEMBLY/reassembled_bins -o BIN_CLASSIFICATION -t 60
+
+#BIN ANNOTATION
+#make environment with prokka version 1.14; even metawrap 1.3.2 still calls 1.13, which has errors
+mkdir FUNCT_ANNOT
+conda activate prokka_env
+cd /data/grouse_shotgun/sharp_grouse/BIN_REASSEMBLY/reassembled_bins
+for file in *.fa
+do
+echo $file
+prefix=${file:0:-3}
+/home/evogenlab/.conda/envs/metawrap-env/bin/metawrap-scripts/shorten_contig_names.py $file > /data/grouse_shotgun/sharp_grouse/FUNCT_ANNOT/tmp_bin.fa
+prokka --cpus 60 --force --outdir /data/grouse_shotgun/sharp_grouse/FUNCT_ANNOT/prokka_out/$prefix --prefix $prefix /data/grouse_shotgun/sharp_grouse/FUNCT_ANNOT/tmp_bin.fa
+done
